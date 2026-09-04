@@ -99,6 +99,7 @@ function undo() {
     redoStack.push(JSON.stringify(objects));
     objects  = JSON.parse(undoStack.pop());
     selected = null;
+    updateDeleteButton();
     render();
     updateUndoRedoButtons();
 }
@@ -109,6 +110,7 @@ function redo() {
     undoStack.push(JSON.stringify(objects));
     objects  = JSON.parse(redoStack.pop());
     selected = null;
+    updateDeleteButton();
     render();
     updateUndoRedoButtons();
 }
@@ -117,6 +119,11 @@ function redo() {
 function updateUndoRedoButtons() {
     document.getElementById('undoBtn').disabled = undoStack.length === 0;
     document.getElementById('redoBtn').disabled = redoStack.length === 0;
+}
+
+// Grey out Delete button when nothing is selected
+function updateDeleteButton() {
+    document.getElementById('deleteBtn').disabled = !selected;
 }
 
 
@@ -429,6 +436,7 @@ function handleMouseDown(e) {
         case 'select': {
             const hit = hitTest(mx, my);
             selected = hit;
+            updateDeleteButton();
             if (hit) {
                 pushUndo(); // snapshot before potential move
                 dragging = true;
@@ -599,6 +607,7 @@ function load() {
         undoStack = [];
         redoStack = [];
         updateUndoRedoButtons();
+        updateDeleteButton();
         render();
     }
 }
@@ -608,8 +617,18 @@ function clearAll() {
         pushUndo();
         objects  = [];
         selected = null;
+        updateDeleteButton();
         render();
     }
+}
+
+function deleteSelected() {
+    if (!selected) return;
+    pushUndo();
+    objects = objects.filter(function (o) { return o !== selected; });
+    selected = null;
+    updateDeleteButton();
+    render();
 }
 
 function exportPNG() {
@@ -629,6 +648,7 @@ document.querySelectorAll('.tool-btn').forEach(function (btn) {
     btn.addEventListener('click', function () {
         tool     = btn.dataset.tool;
         selected = null;
+        updateDeleteButton();
         dragging = false;
         preview    = null;
         placeStart = null;
@@ -649,6 +669,7 @@ document.getElementById('loadBtn').addEventListener('click', load);
 document.getElementById('exportBtn').addEventListener('click', exportPNG);
 document.getElementById('undoBtn').addEventListener('click', undo);
 document.getElementById('redoBtn').addEventListener('click', redo);
+document.getElementById('deleteBtn').addEventListener('click', deleteSelected);
 
 // Keyboard shortcuts
 document.addEventListener('keydown', function (e) {
@@ -661,6 +682,12 @@ document.addEventListener('keydown', function (e) {
     if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
         e.preventDefault();
         redo();
+    }
+    // Delete / Backspace = Remove selected object
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+        // Prevent Backspace from navigating back in the browser
+        e.preventDefault();
+        deleteSelected();
     }
 });
 
