@@ -7,11 +7,10 @@
 // ----- Constants ---------------------------------------------------
 
 const GRID = 20;            // One grid square = 20 pixels
-const METERS_PER_GRID = 0.5; // 20 px represents 0.5 metres
+const METERS_PER_GRID = 1; // 20 px represents 1 metre
 const WALL_THICK = 4;       // Wall line width (px)
 const DOOR_SIZE = 10;       // Door marker radius (px)
-const WIN_W = 14;           // Window marker width (px)
-const WIN_H = 4;            // Window marker height (px)
+
 const HIT_DIST = 8;         // Max pixel distance for a wall hit-test
 
 
@@ -172,16 +171,23 @@ function drawDoor(obj, isSel) {
     ctx.fill();
 }
 
-// -- Window (small thin rectangle) ------------------------------
+// -- Window (rectangle placed along a wall) ----------------------
 
 function drawWindow(obj, isSel) {
-    const hw = WIN_W / 2;
-    const hh = WIN_H / 2;
-    ctx.fillStyle   = isSel ? COL.selected : COL.window;
-    ctx.fillRect(obj.x - hw, obj.y - hh, WIN_W, WIN_H);
+    ctx.fillStyle = isSel ? 'rgba(0,212,170,0.12)' : 'rgba(74, 255, 184, 0.15)';
+    ctx.fillRect(obj.x, obj.y, obj.w, obj.h);
+
     ctx.strokeStyle = isSel ? COL.selected : COL.window;
-    ctx.lineWidth   = 1;
-    ctx.strokeRect(obj.x - hw, obj.y - hh, WIN_W, WIN_H);
+    ctx.lineWidth   = isSel ? 2 : 1.5;
+    ctx.strokeRect(obj.x, obj.y, obj.w, obj.h);
+
+    if (obj.w > 24 && obj.h > 16) {
+        ctx.fillStyle    = isSel ? COL.selected : COL.window;
+        ctx.font         = '10px sans-serif';
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('Window', obj.x + obj.w / 2, obj.y + obj.h / 2);
+    }
 }
 
 // -- Furniture (filled rectangle with label) --------------------
@@ -211,7 +217,7 @@ function drawPreview() {
     ctx.save();
     ctx.globalAlpha = 0.7;
 
-    if (preview.type === 'room' || preview.type === 'furniture') {
+    if (preview.type === 'room' || preview.type === 'furniture' || preview.type === 'window') {
         ctx.fillStyle   = COL.preview;
         ctx.fillRect(preview.x, preview.y, preview.w, preview.h);
         ctx.strokeStyle = COL.previewLine;
@@ -270,7 +276,7 @@ function drawSelectionHandles(obj) {
 
 // Return corner positions for rect objects
 function getCorners(obj) {
-    if (obj.type === 'room' || obj.type === 'furniture') {
+    if (obj.type === 'room' || obj.type === 'furniture' || obj.type === 'window') {
         return [
             { x: obj.x,         y: obj.y },
             { x: obj.x + obj.w, y: obj.y },
@@ -354,11 +360,11 @@ function hitTest(mx, my) {
         const obj = objects[i];
         let hit = false;
 
-        if (obj.type === 'room' || obj.type === 'furniture') {
+        if (obj.type === 'room' || obj.type === 'furniture' || obj.type === 'window') {
             hit = pointInRect(mx, my, obj);
         } else if (obj.type === 'wall') {
             hit = pointNearLine(mx, my, obj);
-        } else if (obj.type === 'door' || obj.type === 'window') {
+        } else if (obj.type === 'door') {
             hit = Math.hypot(mx - obj.x, my - obj.y) < HIT_DIST;
         }
 
@@ -389,10 +395,11 @@ function handleMouseDown(e) {
             break;
         }
 
-        // ---- ROOM / WALL / FURNITURE (rubber-band) -----------
+        // ---- ROOM / WALL / FURNITURE / WINDOW (rubber-band) ---
         case 'room':
         case 'wall':
-        case 'furniture': {
+        case 'furniture':
+        case 'window': {
             const sx = snap(mx);
             const sy = snap(my);
             placeStart = { x: sx, y: sy };
@@ -407,13 +414,6 @@ function handleMouseDown(e) {
         // ---- DOOR (click to place) ---------------------------
         case 'door': {
             objects.push({ type: 'door', x: snap(mx), y: snap(my) });
-            render();
-            break;
-        }
-
-        // ---- WINDOW (click to place) -------------------------
-        case 'window': {
-            objects.push({ type: 'window', x: snap(mx), y: snap(my) });
             render();
             break;
         }
@@ -432,7 +432,7 @@ function handleMouseMove(e) {
             const nx = snap(mx - dragOffset.x);
             const ny = snap(my - dragOffset.y);
 
-            if (selected.type === 'room' || selected.type === 'furniture') {
+            if (selected.type === 'room' || selected.type === 'furniture' || selected.type === 'window') {
                 selected.x = nx;
                 selected.y = ny;
             } else if (selected.type === 'wall') {
@@ -444,7 +444,7 @@ function handleMouseMove(e) {
                 selected.x2 += dx;
                 selected.y2 += dy;
             } else {
-                // Door / Window — just move the point
+                // Door — just move the point
                 selected.x = nx;
                 selected.y = ny;
             }
@@ -452,9 +452,10 @@ function handleMouseMove(e) {
             break;
         }
 
-        // ---- ROOM / FURNITURE (rubber-band) ------------------
+        // ---- ROOM / FURNITURE / WINDOW (rubber-band) ----------
         case 'room':
-        case 'furniture': {
+        case 'furniture':
+        case 'window': {
             if (!placeStart || !preview) break;
             preview.w = snap(mx) - placeStart.x;
             preview.h = snap(my) - placeStart.y;
@@ -485,9 +486,10 @@ function handleMouseUp(e) {
             break;
         }
 
-        // ---- ROOM / FURNITURE (finish rubber-band) -----------
+        // ---- ROOM / FURNITURE / WINDOW (finish rubber-band) ---
         case 'room':
-        case 'furniture': {
+        case 'furniture':
+        case 'window': {
             if (!placeStart || !preview) break;
 
             const w = Math.abs(preview.w);
