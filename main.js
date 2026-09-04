@@ -45,6 +45,10 @@ let dragOffset = { x: 0, y: 0 }; // Mouse-to-object offset during drag
 let placeStart = null;   // Grid-snapped start point while drawing
 let preview    = null;   // Temporary preview object shown while dragging
 
+// Undo / Redo stacks — each entry is a JSON snapshot of objects[]
+let undoStack = [];
+let redoStack = [];
+
 
 // ----- Canvas setup ------------------------------------------------
 
@@ -75,6 +79,44 @@ function pxToM(px) {
 function getMousePos(e) {
     const r = canvas.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
+}
+
+
+// ============================================================
+// UNDO / REDO
+// ============================================================
+
+// Save a snapshot of the current state before a mutation
+function pushUndo() {
+    undoStack.push(JSON.stringify(objects));
+    redoStack = [];
+    updateUndoRedoButtons();
+}
+
+// Restore the state before the last mutation
+function undo() {
+    if (undoStack.length === 0) return;
+    redoStack.push(JSON.stringify(objects));
+    objects  = JSON.parse(undoStack.pop());
+    selected = null;
+    render();
+    updateUndoRedoButtons();
+}
+
+// Re-apply the last undone mutation
+function redo() {
+    if (redoStack.length === 0) return;
+    undoStack.push(JSON.stringify(objects));
+    objects  = JSON.parse(redoStack.pop());
+    selected = null;
+    render();
+    updateUndoRedoButtons();
+}
+
+// Grey out buttons when their stack is empty
+function updateUndoRedoButtons() {
+    document.getElementById('undoBtn').disabled = undoStack.length === 0;
+    document.getElementById('redoBtn').disabled = redoStack.length === 0;
 }
 
 
@@ -388,6 +430,7 @@ function handleMouseDown(e) {
             const hit = hitTest(mx, my);
             selected = hit;
             if (hit) {
+                pushUndo(); // snapshot before potential move
                 dragging = true;
                 dragOffset = { x: mx - hit.x, y: my - hit.y };
             }
@@ -413,6 +456,7 @@ function handleMouseDown(e) {
 
         // ---- DOOR (click to place) ---------------------------
         case 'door': {
+            pushUndo();
             objects.push({ type: 'door', x: snap(mx), y: snap(my) });
             render();
             break;
@@ -497,6 +541,7 @@ function handleMouseUp(e) {
 
             // Only create the object if it's bigger than one grid square
             if (w >= GRID && h >= GRID) {
+                pushUndo();
                 objects.push({
                     type: tool,
                     x: Math.min(preview.x, preview.x + preview.w),
@@ -519,6 +564,7 @@ function handleMouseUp(e) {
             const len = Math.hypot(preview.x2 - preview.x, preview.y2 - preview.y);
 
             if (len >= GRID) {
+                pushUndo();
                 objects.push({
                     type: 'wall',
                     x:  preview.x,
@@ -548,14 +594,18 @@ function save() {
 function load() {
     const raw = localStorage.getItem('flort-objects');
     if (raw) {
-        objects  = JSON.parse(raw);
-        selected = null;
+        objects   = JSON.parse(raw);
+        selected  = null;
+        undoStack = [];
+        redoStack = [];
+        updateUndoRedoButtons();
         render();
     }
 }
 
 function clearAll() {
     if (objects.length === 0 || confirm('Clear all objects?')) {
+        pushUndo();
         objects  = [];
         selected = null;
         render();
@@ -597,6 +647,22 @@ document.getElementById('clearBtn').addEventListener('click', clearAll);
 document.getElementById('saveBtn').addEventListener('click', save);
 document.getElementById('loadBtn').addEventListener('click', load);
 document.getElementById('exportBtn').addEventListener('click', exportPNG);
+document.getElementById('undoBtn').addEventListener('click', undo);
+document.getElementById('redoBtn').addEventListener('click', redo);
+
+// Keyboard shortcuts
+document.addEventListener('keydown', function (e) {
+    // Ctrl+Z / Cmd+Z = Undo
+    if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+    }
+    // Ctrl+Y / Cmd+Y  or  Ctrl+Shift+Z / Cmd+Shift+Z = Redo
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
+        e.preventDefault();
+        redo();
+    }
+});
 
 
 // ============================================================

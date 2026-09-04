@@ -15,6 +15,19 @@
         <button class="tool-btn" data-tool="window">Add Window</button>
         <button class="tool-btn" data-tool="furniture">Add Furniture</button>
         <div class="separator"></div>
+        <button class="icon-btn" id="undoBtn" aria-label="Undo" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 10h10a5 5 0 0 1 0 10h-3"/>
+                <polyline points="7 6 3 10 7 14"/>
+            </svg>
+        </button>
+        <button class="icon-btn" id="redoBtn" aria-label="Redo" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 10H11a5 5 0 0 0 0 10h3"/>
+                <polyline points="17 6 21 10 17 14"/>
+            </svg>
+        </button>
+        <div class="separator"></div>
         <button class="action-btn" id="clearBtn">Clear All</button>
         <button class="action-btn" id="saveBtn">Save</button>
         <button class="action-btn" id="loadBtn">Load</button>

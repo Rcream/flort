@@ -65,6 +65,49 @@ body {
     background: #00eabb;
 }
 
+.tool-btn:disabled,
+.action-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+/* --- Icon buttons (Undo / Redo) --- */
+.icon-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border: 1px solid #2a2a38;
+    border-radius: 6px;
+    background: #1e1e2a;
+    color: #b0b0c0;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.icon-btn svg {
+    width: 18px;
+    height: 18px;
+    pointer-events: none;
+}
+
+.icon-btn:hover {
+    background: #282838;
+    color: #ffffff;
+    border-color: #3a3a4a;
+}
+
+.icon-btn:active {
+    background: #32324a;
+}
+
+.icon-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
 /* --- Separator between tool groups --- */
 .separator {
     width: 1px;
