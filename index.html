@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flort — Floor Plan Maker</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="toolbar">
+        <button class="tool-btn active" data-tool="select">Select</button>
+        <button class="tool-btn" data-tool="room">Add Room</button>
+        <button class="tool-btn" data-tool="wall">Add Wall</button>
+        <button class="tool-btn" data-tool="door">Add Door</button>
+        <button class="tool-btn" data-tool="window">Add Window</button>
+        <button class="tool-btn" data-tool="furniture">Add Furniture</button>
+        <div class="separator"></div>
+        <button class="action-btn" id="clearBtn">Clear All</button>
+        <button class="action-btn" id="saveBtn">Save</button>
+        <button class="action-btn" id="loadBtn">Load</button>
+        <button class="action-btn" id="exportBtn">Export PNG</button>
+    </div>
+    <canvas id="canvas"></canvas>
+    <script src="main.js"></script>
+</body>
+</html>
