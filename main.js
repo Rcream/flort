@@ -12,6 +12,12 @@ const WALL_THICK = 4;       // Wall line width (px)
 const DOOR_SIZE = 10;       // Door marker radius (px)
 
 const HIT_DIST = 8;         // Max pixel distance for a wall hit-test
+const MAGNET_DIST = 10;     // Pixels within which furniture snaps to a wall
+const FURNITURE_KINDS = {   // Preset furniture proportions (px at 1 m/grid)
+    bed:   { ratio: 2, label: 'Bed' },
+    table: { ratio: 1, label: 'Table' },
+    sofa:  { ratio: 3, label: 'Sofa' },
+};
 
 
 // ----- Colours (dark theme) ----------------------------------------
@@ -29,6 +35,7 @@ const COL = {
     furniture:    'rgba(70, 50, 100, 0.5)',
     furnBorder:   '#9b7aff',
     furnLabel:    '#c4aaff',
+    collision:    '#ff4b4b',
     selected:     '#00d4aa',
     preview:      'rgba(0, 212, 170, 0.25)',
     previewLine:  '#00d4aa',
@@ -48,6 +55,13 @@ let preview    = null;   // Temporary preview object shown while dragging
 // Undo / Redo stacks — each entry is a JSON snapshot of objects[]
 let undoStack = [];
 let redoStack = [];
+
+// CAD-lite interaction state
+let wallGrip      = null;       // 'start' | 'end' — which wall endpoint follows the mouse
+let gripMouse     = { x: 0, y: 0 }; // Last snap()-ped grip position while stretching
+let rotating      = false;      // True while dragging a furniture rotation handle
+let furnitureKind = 'bed';      // Currently selected furniture preset
+let rafPending    = false;      // Dirty flag for requestAnimationFrame render coalescing
 
 
 // ----- Canvas setup ------------------------------------------------
@@ -79,6 +93,172 @@ function pxToM(px) {
 function getMousePos(e) {
     const r = canvas.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
+}
+
+
+// ============================================================
+// CAD-LITE HELPERS
+// ============================================================
+
+// Effective axis-aligned box for an object. Furniture rotates in 90-degree
+// steps, so rotating swaps w/h around the same center and the result is
+// still axis-aligned — no canvas transforms are needed.
+function getRectFor(obj) {
+    if (obj.type === 'furniture' && (obj.angle === 90 || obj.angle === 270)) {
+        const cx = obj.x + obj.w / 2;
+        const cy = obj.y + obj.h / 2;
+        return { x: cx - obj.h / 2, y: cy - obj.w / 2, w: obj.h, h: obj.w };
+    }
+    return obj;
+}
+
+// Lock a rubber-band size to a width:height ratio, keeping each dimension
+// on the grid. The dominant axis drives the shape.
+function ratioRect(w, h, ratio) {
+    const signW = w < 0 ? -1 : 1;
+    const signH = h < 0 ? -1 : 1;
+    let aw = Math.abs(w);
+    let ah = Math.abs(h);
+    if (aw === 0 && ah === 0) return { w: 0, h: 0 };
+    if (aw * ratio >= ah) {
+        ah = Math.round(aw / ratio / GRID) * GRID;
+    } else {
+        aw = Math.round(ah * ratio / GRID) * GRID;
+    }
+    return { w: signW * aw, h: signH * ah };
+}
+
+// Position of a furniture piece's rotation handle (above its top edge)
+function rotateHandlePos(obj) {
+    const box = getRectFor(obj);
+    return { x: box.x + box.w / 2, y: box.y - 18 };
+}
+
+// Is (px, py) near the rotation handle of this furniture?
+function nearRotateHandle(obj, px, py) {
+    const h = rotateHandlePos(obj);
+    return Math.hypot(px - h.x, py - h.y) < 14;
+}
+
+// Set the selected furniture's angle to the nearest 90° step facing the
+// pointer, measured from the furniture's center.
+function rotateSelectedToPointer(mx, my) {
+    if (!selected || selected.type !== 'furniture') return;
+    const box = getRectFor(selected);
+    const cx = box.x + box.w / 2;
+    const cy = box.y + box.h / 2;
+    let deg = Math.round(Math.atan2(my - cy, mx - cx) * 180 / Math.PI / 90) * 90;
+    selected.angle = ((deg % 360) + 360) % 360;
+}
+
+// Magnetic wall snapping: if an edge of the furniture's effective box is
+// within MAGNET_DIST of an axis-aligned wall, return the {dx, dy} offset
+// that slides it flush against the wall. Returns null if nothing is near.
+function magnetSnap(furn) {
+    if (!furn || furn.type !== 'furniture') return null;
+
+    const box = getRectFor(furn);
+    let best = null;
+    let bestDist = MAGNET_DIST + 1;
+
+    for (const other of objects) {
+        if (other === furn || other.type !== 'wall') continue;
+        // Only horizontal / vertical walls participate (v1)
+        if (other.x !== other.x2 && other.y !== other.y2) continue;
+
+        if (other.x === other.x2) {
+            // Vertical wall — align nearest left/right furniture edge
+            const dLeft  = Math.abs(box.x - other.x);
+            const dRight = Math.abs(box.x + box.w - other.x);
+            const d = Math.min(dLeft, dRight);
+            if (d <= MAGNET_DIST && d < bestDist) {
+                bestDist = d;
+                best = dLeft <= dRight
+                    ? { dx: other.x - box.x, dy: 0 }
+                    : { dx: other.x - (box.x + box.w), dy: 0 };
+            }
+        } else {
+            // Horizontal wall — align nearest top/bottom furniture edge
+            const dTop    = Math.abs(box.y - other.y);
+            const dBottom = Math.abs(box.y + box.h - other.y);
+            const d = Math.min(dTop, dBottom);
+            if (d <= MAGNET_DIST && d < bestDist) {
+                bestDist = d;
+                best = dTop <= dBottom
+                    ? { dx: 0, dy: other.y - box.y }
+                    : { dx: 0, dy: other.y - (box.y + box.h) };
+            }
+        }
+    }
+    return best;
+}
+
+// Does segment (a1,b1)-(a2,b2) cross segment (c1,d1)-(c2,d2)?
+function segmentCrosses(ax, ay, bx, by, cx, cy, dx, dy) {
+    const d1x = bx - ax, d1y = by - ay;
+    const d2x = dx - cx, d2y = dy - cy;
+    const det = d1x * d2y - d1y * d2x;
+    if (Math.abs(det) < 1e-9) return false; // parallel
+    const t = ((cx - ax) * d2y - (cy - ay) * d2x) / det;
+    const u = ((cx - ax) * d1y - (cy - ay) * d1x) / det;
+    return t >= 0 && t <= 1 && u >= 0 && u <= 1;
+}
+
+// Does a line segment pass through an axis-aligned box?
+// (Uses strict bounds so an endpoint merely touching an edge is not a hit.)
+function segmentHitsBox(x1, y1, x2, y2, box) {
+    const r = box.x + box.w;
+    const b = box.y + box.h;
+    // Endpoint strictly inside the box?
+    if (x1 > box.x && x1 < r && y1 > box.y && y1 < b) return true;
+    if (x2 > box.x && x2 < r && y2 > box.y && y2 < b) return true;
+    // Segment crossing any of the four box edges?
+    return segmentCrosses(x1, y1, x2, y2, box.x, box.y, r, box.y) ||
+           segmentCrosses(x1, y1, x2, y2, r, box.y, r, b) ||
+           segmentCrosses(x1, y1, x2, y2, r, b, box.x, b) ||
+           segmentCrosses(x1, y1, x2, y2, box.x, b, box.x, box.y);
+}
+
+// AABB overlap test (uses effective boxes so rotated furniture works)
+function boxesOverlap(a, b) {
+    return a.x < b.x + b.w && a.x + a.w > b.x &&
+           a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+// Does the given furniture overlap a wall or another piece of furniture?
+function furnitureCollides(furn) {
+    const box = getRectFor(furn);
+    for (const other of objects) {
+        if (other === furn) continue;
+        if (other.type === 'furniture') {
+            if (boxesOverlap(box, getRectFor(other))) return true;
+        } else if (other.type === 'wall') {
+            if (segmentHitsBox(other.x, other.y, other.x2, other.y2, box)) return true;
+        }
+    }
+    return false;
+}
+
+// Colliding objects, recomputed every frame. Kept separate from objects[]
+// so the collision flag never leaks into save / undo snapshots.
+let colliding = new Set();
+
+// Mark every furniture piece that currently collides
+function computeCollisions() {
+    colliding = new Set();
+    for (const obj of objects) {
+        if (obj.type === 'furniture' && furnitureCollides(obj)) colliding.add(obj);
+    }
+}
+
+// Coalesce renders onto the next animation frame (keeps drags at 60fps)
+function requestRender() {
+    if (rafPending) return;
+    rafPending = true;
+    requestAnimationFrame(function () {
+        rafPending = false;
+        render();
+    });
 }
 
 
@@ -142,7 +322,7 @@ function drawGrid() {
         ctx.beginPath();
         ctx.moveTo(Math.round(x) + 0.5, 0);
         ctx.lineTo(Math.round(x) + 0.5, h);
-        // Brighter line every 5 squares (every 2.5 m)
+        // Brighter line every 5 squares (every 5 m)
         ctx.strokeStyle = (x / GRID) % 5 === 0 ? COL.gridMajor : COL.grid;
         ctx.stroke();
     }
@@ -242,19 +422,33 @@ function drawWindow(obj, isSel) {
 // -- Furniture (filled rectangle with label) --------------------
 
 function drawFurniture(obj, isSel) {
-    ctx.fillStyle = isSel ? 'rgba(0,212,170,0.12)' : COL.furniture;
-    ctx.fillRect(obj.x, obj.y, obj.w, obj.h);
+    const box   = getRectFor(obj);
+    const label = obj.label || 'Furniture';
+    const bad   = colliding.has(obj);
 
-    ctx.strokeStyle = isSel ? COL.selected : COL.furnBorder;
-    ctx.lineWidth   = isSel ? 2 : 1.5;
-    ctx.strokeRect(obj.x, obj.y, obj.w, obj.h);
+    // Fill (slightly different tint per preset kind)
+    ctx.fillStyle = isSel ? 'rgba(0,212,170,0.12)' :
+                   (obj.kind === 'table' ? 'rgba(50, 100, 70, 0.5)' :
+                    obj.kind === 'sofa'  ? 'rgba(120, 60, 40, 0.5)' : COL.furniture);
+    ctx.fillRect(box.x, box.y, box.w, box.h);
 
-    if (obj.w > 24 && obj.h > 18) {
-        ctx.fillStyle    = isSel ? COL.selected : COL.furnLabel;
+    // Border — red when colliding with a wall or another piece of furniture
+    ctx.strokeStyle = bad ? COL.collision : (isSel ? COL.selected : COL.furnBorder);
+    ctx.lineWidth   = bad ? 2.5 : (isSel ? 2 : 1.5);
+    ctx.strokeRect(box.x, box.y, box.w, box.h);
+
+    if (box.w > 24 && box.h > 18) {
+        ctx.save();
+        ctx.translate(box.x + box.w / 2, box.y + box.h / 2);
+        // Rotate the label with the furniture for 90/270
+        if (obj.angle === 90)          ctx.rotate(Math.PI / 2);
+        else if (obj.angle === 270)    ctx.rotate(-Math.PI / 2);
+        ctx.fillStyle    = bad ? COL.collision : (isSel ? COL.selected : COL.furnLabel);
         ctx.font         = '10px sans-serif';
         ctx.textAlign    = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText('Furniture', obj.x + obj.w / 2, obj.y + obj.h / 2);
+        ctx.fillText(label, 0, 0);
+        ctx.restore();
     }
 }
 
@@ -279,6 +473,13 @@ function drawPreview() {
         const w = Math.abs(preview.w);
         const h = Math.abs(preview.h);
         if (w > 10 && h > 10) {
+            // Label the preset kind above the dimensions for furniture
+            if (preview.type === 'furniture') {
+                ctx.fillStyle = COL.selected;
+                ctx.font      = '10px sans-serif';
+                ctx.fillText(FURNITURE_KINDS[furnitureKind].label,
+                    preview.x + preview.w / 2, preview.y + preview.h / 2 - 10);
+            }
             const label = pxToM(w) + 'm \u00d7 ' + pxToM(h) + 'm';
             ctx.fillStyle    = COL.selected;
             ctx.font         = '12px sans-serif';
@@ -321,19 +522,35 @@ function drawSelectionHandles(obj) {
     for (const c of corners) {
         ctx.fillRect(c.x - 3, c.y - 3, 6, 6);
     }
+
+    // Furniture gets a circular rotation handle above its top edge
+    if (obj.type === 'furniture') {
+        const h = rotateHandlePos(obj);
+        ctx.beginPath();
+        ctx.arc(h.x, h.y, 7, 0, Math.PI * 2);
+        ctx.fillStyle   = COL.selected;
+        ctx.fill();
+        ctx.strokeStyle = COL.canvasBg;
+        ctx.lineWidth   = 2;
+        ctx.stroke();
+        ctx.fillStyle   = COL.canvasBg;
+        ctx.font        = 'bold 11px sans-serif';
+        ctx.textAlign   = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('\u27F3', h.x, h.y + 0.5);
+    }
 }
 
-// Return corner positions for rect objects
+// Return corner positions for rect objects (uses effective box for rotation)
 function getCorners(obj) {
-    if (obj.type === 'room' || obj.type === 'furniture' || obj.type === 'window') {
-        return [
-            { x: obj.x,         y: obj.y },
-            { x: obj.x + obj.w, y: obj.y },
-            { x: obj.x + obj.w, y: obj.y + obj.h },
-            { x: obj.x,         y: obj.y + obj.h },
-        ];
-    }
-    return [];
+    if (obj.type !== 'room' && obj.type !== 'furniture' && obj.type !== 'window') return [];
+    const box = getRectFor(obj);
+    return [
+        { x: box.x,         y: box.y },
+        { x: box.x + box.w, y: box.y },
+        { x: box.x + box.w, y: box.y + box.h },
+        { x: box.x,         y: box.y + box.h },
+    ];
 }
 
 
@@ -349,6 +566,9 @@ function render() {
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     drawGrid();
+
+    // Refresh collision flags before drawing (red borders for overlaps)
+    computeCollisions();
 
     // Draw every object in order
     for (const obj of objects) {
@@ -410,7 +630,7 @@ function hitTest(mx, my) {
         let hit = false;
 
         if (obj.type === 'room' || obj.type === 'furniture' || obj.type === 'window') {
-            hit = pointInRect(mx, my, obj);
+            hit = pointInRect(mx, my, getRectFor(obj));
         } else if (obj.type === 'wall') {
             hit = pointNearLine(mx, my, obj);
         } else if (obj.type === 'door') {
@@ -434,13 +654,33 @@ function handleMouseDown(e) {
 
         // ---- SELECT / MOVE ------------------------------------
         case 'select': {
+            // Rotation handle takes priority when a furniture piece is selected
+            if (selected && selected.type === 'furniture' && nearRotateHandle(selected, mx, my)) {
+                pushUndo();           // snapshot before the rotation
+                rotating = true;
+                rotateSelectedToPointer(mx, my);
+                render();
+                break;
+            }
+
             const hit = hitTest(mx, my);
             selected = hit;
             updateDeleteButton();
             if (hit) {
-                pushUndo(); // snapshot before potential move
+                pushUndo(); // snapshot before potential move / stretch
                 dragging = true;
-                dragOffset = { x: mx - hit.x, y: my - hit.y };
+                if (hit.type === 'wall') {
+                    // Stretch: the endpoint closer to the click becomes the grip
+                    const dStart = Math.hypot(mx - hit.x, my - hit.y);
+                    const dEnd   = Math.hypot(mx - hit.x2, my - hit.y2);
+                    wallGrip  = dStart <= dEnd ? 'start' : 'end';
+                    gripMouse = { x: snap(mx), y: snap(my) };
+                } else if (hit.type === 'room' || hit.type === 'furniture' || hit.type === 'window') {
+                    const r = getRectFor(hit);
+                    dragOffset = { x: mx - r.x, y: my - r.y };
+                } else {
+                    dragOffset = { x: mx - hit.x, y: my - hit.y };
+                }
             }
             render();
             break;
@@ -481,26 +721,54 @@ function handleMouseMove(e) {
         case 'select': {
             if (!dragging || !selected) break;
 
+            // Furniture rotation: drag the handle around the center
+            if (rotating) {
+                rotateSelectedToPointer(mx, my);
+                requestRender();
+                break;
+            }
+
+            // Wall stretching: slide the grip endpoint, keep the anchor fixed
+            if (selected.type === 'wall' && wallGrip) {
+                const sx = snap(mx);
+                const sy = snap(my);
+                const dx = sx - gripMouse.x;
+                const dy = sy - gripMouse.y;
+                if (wallGrip === 'start') {
+                    selected.x += dx;
+                    selected.y += dy;
+                } else {
+                    selected.x2 += dx;
+                    selected.y2 += dy;
+                }
+                gripMouse = { x: sx, y: sy };
+                requestRender();
+                break;
+            }
+
             const nx = snap(mx - dragOffset.x);
             const ny = snap(my - dragOffset.y);
 
-            if (selected.type === 'room' || selected.type === 'furniture' || selected.type === 'window') {
+            if (selected.type === 'furniture') {
+                // Move via the effective box so rotated pieces track the pointer
+                const cur = getRectFor(selected);
+                selected.x += nx - cur.x;
+                selected.y += ny - cur.y;
+                // Magnetic wall snap wins over plain grid snapping when close
+                const mag = magnetSnap(selected);
+                if (mag) {
+                    selected.x += mag.dx;
+                    selected.y += mag.dy;
+                }
+            } else if (selected.type === 'room' || selected.type === 'window') {
                 selected.x = nx;
                 selected.y = ny;
-            } else if (selected.type === 'wall') {
-                // Move the whole wall by maintaining the offset between endpoints
-                const dx = nx - selected.x;
-                const dy = ny - selected.y;
-                selected.x  = nx;
-                selected.y  = ny;
-                selected.x2 += dx;
-                selected.y2 += dy;
             } else {
                 // Door — just move the point
                 selected.x = nx;
                 selected.y = ny;
             }
-            render();
+            requestRender();
             break;
         }
 
@@ -509,9 +777,17 @@ function handleMouseMove(e) {
         case 'furniture':
         case 'window': {
             if (!placeStart || !preview) break;
-            preview.w = snap(mx) - placeStart.x;
-            preview.h = snap(my) - placeStart.y;
-            render();
+            if (tool === 'furniture') {
+                // Lock the preview to the selected preset's aspect ratio
+                const r = ratioRect(snap(mx) - placeStart.x, snap(my) - placeStart.y,
+                                    FURNITURE_KINDS[furnitureKind].ratio);
+                preview.w = r.w;
+                preview.h = r.h;
+            } else {
+                preview.w = snap(mx) - placeStart.x;
+                preview.h = snap(my) - placeStart.y;
+            }
+            requestRender();
             break;
         }
 
@@ -520,7 +796,7 @@ function handleMouseMove(e) {
             if (!placeStart || !preview) break;
             preview.x2 = snap(mx);
             preview.y2 = snap(my);
-            render();
+            requestRender();
             break;
         }
     }
@@ -534,6 +810,8 @@ function handleMouseUp(e) {
         // ---- SELECT (finish drag) ----------------------------
         case 'select': {
             dragging = false;
+            rotating = false;
+            wallGrip = null;
             dragOffset = { x: 0, y: 0 };
             break;
         }
@@ -550,13 +828,19 @@ function handleMouseUp(e) {
             // Only create the object if it's bigger than one grid square
             if (w >= GRID && h >= GRID) {
                 pushUndo();
-                objects.push({
-                    type: tool,
-                    x: Math.min(preview.x, preview.x + preview.w),
-                    y: Math.min(preview.y, preview.y + preview.h),
-                    w: w,
-                    h: h,
-                });
+                const x = Math.min(preview.x, preview.x + preview.w);
+                const y = Math.min(preview.y, preview.y + preview.h);
+                if (tool === 'furniture') {
+                    objects.push({
+                        type: 'furniture',
+                        x: x, y: y, w: w, h: h,
+                        kind: furnitureKind,
+                        label: FURNITURE_KINDS[furnitureKind].label,
+                        angle: 0,
+                    });
+                } else {
+                    objects.push({ type: tool, x: x, y: y, w: w, h: h });
+                }
             }
 
             preview    = null;
@@ -670,6 +954,11 @@ document.getElementById('exportBtn').addEventListener('click', exportPNG);
 document.getElementById('undoBtn').addEventListener('click', undo);
 document.getElementById('redoBtn').addEventListener('click', redo);
 document.getElementById('deleteBtn').addEventListener('click', deleteSelected);
+
+// Furniture preset dropdown
+document.getElementById('furnitureMenu').addEventListener('change', function (e) {
+    furnitureKind = e.target.value;
+});
 
 // Keyboard shortcuts
 document.addEventListener('keydown', function (e) {
