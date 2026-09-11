@@ -58,7 +58,6 @@ let redoStack = [];
 
 // CAD-lite interaction state
 let wallGrip      = null;       // 'start' | 'end' — which wall endpoint follows the mouse
-let gripMouse     = { x: 0, y: 0 }; // Last snap()-ped grip position while stretching
 let rotating      = false;      // True while dragging a furniture rotation handle
 let furnitureKind = 'bed';      // Currently selected furniture preset
 let rafPending    = false;      // Dirty flag for requestAnimationFrame render coalescing
@@ -187,6 +186,31 @@ function magnetSnap(furn) {
                 best = dTop <= dBottom
                     ? { dx: 0, dy: other.y - box.y }
                     : { dx: 0, dy: other.y - (box.y + box.h) };
+            }
+        }
+    }
+    return best;
+}
+
+// Endpoint-to-endpoint snapping: if (ex, ey) is within MAGNET_DIST of an
+// existing wall's endpoint, return that endpoint's {x, y}.  skipWall is
+// excluded (the wall currently being stretched).  Returns null if nothing
+// is near.
+function wallEndpointSnap(ex, ey, skipWall) {
+    let best = null;
+    let bestDist = MAGNET_DIST + 1;
+    for (const w of objects) {
+        if (w.type !== 'wall' || w === skipWall) continue;
+        // Both endpoints of every wall
+        var pts = [
+            { x: w.x,  y: w.y  },
+            { x: w.x2, y: w.y2 },
+        ];
+        for (var i = 0; i < 2; i++) {
+            var d = Math.hypot(ex - pts[i].x, ey - pts[i].y);
+            if (d <= MAGNET_DIST && d < bestDist) {
+                bestDist = d;
+                best = pts[i];
             }
         }
     }
@@ -674,7 +698,6 @@ function handleMouseDown(e) {
                     const dStart = Math.hypot(mx - hit.x, my - hit.y);
                     const dEnd   = Math.hypot(mx - hit.x2, my - hit.y2);
                     wallGrip  = dStart <= dEnd ? 'start' : 'end';
-                    gripMouse = { x: snap(mx), y: snap(my) };
                 } else if (hit.type === 'room' || hit.type === 'furniture' || hit.type === 'window') {
                     const r = getRectFor(hit);
                     dragOffset = { x: mx - r.x, y: my - r.y };
@@ -728,20 +751,21 @@ function handleMouseMove(e) {
                 break;
             }
 
-            // Wall stretching: slide the grip endpoint, keep the anchor fixed
+            // Wall stretching: slide the grip endpoint, keep the anchor fixed.
+            // If the moving endpoint is near another wall's endpoint, snap to it.
             if (selected.type === 'wall' && wallGrip) {
-                const sx = snap(mx);
-                const sy = snap(my);
-                const dx = sx - gripMouse.x;
-                const dy = sy - gripMouse.y;
+                var tx = snap(mx);
+                var ty = snap(my);
+                var ep = wallEndpointSnap(tx, ty, selected);
+                var gx = ep ? ep.x : tx;
+                var gy = ep ? ep.y : ty;
                 if (wallGrip === 'start') {
-                    selected.x += dx;
-                    selected.y += dy;
+                    selected.x = gx;
+                    selected.y = gy;
                 } else {
-                    selected.x2 += dx;
-                    selected.y2 += dy;
+                    selected.x2 = gx;
+                    selected.y2 = gy;
                 }
-                gripMouse = { x: sx, y: sy };
                 requestRender();
                 break;
             }
@@ -794,8 +818,11 @@ function handleMouseMove(e) {
         // ---- WALL (rubber-band) ------------------------------
         case 'wall': {
             if (!placeStart || !preview) break;
-            preview.x2 = snap(mx);
-            preview.y2 = snap(my);
+            var tx = snap(mx);
+            var ty = snap(my);
+            var ep = wallEndpointSnap(tx, ty, null);
+            preview.x2 = ep ? ep.x : tx;
+            preview.y2 = ep ? ep.y : ty;
             requestRender();
             break;
         }
