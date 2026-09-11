@@ -46,9 +46,10 @@ const COL = {
 
 let objects    = [];     // All placed floor-plan objects
 let tool       = 'select'; // Current tool name
-let selected   = null;   // The object currently selected (or null)
+let selection  = [];     // Currently selected objects (marquee can select many)
 let dragging   = false;  // True while the user drags with Select tool
-let dragOffset = { x: 0, y: 0 }; // Mouse-to-object offset during drag
+let dragBase   = null;   // Initial positions of the selected group at drag start
+let dragStartMouse = { x: 0, y: 0 }; // Grid-snapped mouse at drag start
 let placeStart = null;   // Grid-snapped start point while drawing
 let preview    = null;   // Temporary preview object shown while dragging
 
@@ -62,6 +63,8 @@ let rotating      = false;      // True while dragging a furniture rotation hand
 let furnitureKind = 'bed';      // Currently selected furniture preset
 let rafPending    = false;      // Dirty flag for requestAnimationFrame render coalescing
 let editingRoom   = null;      // Room whose name is being edited (or null)
+let marqueeStart  = null;      // Where the user pressed to begin a marquee (or null)
+let marqueeRect   = null;      // Live marquee box while dragging (or null)
 
 
 // ----- Canvas setup ------------------------------------------------
@@ -115,6 +118,11 @@ function getRectFor(obj) {
     return obj;
 }
 
+// The only selected object, or null when multiple (or none) are selected.
+function selSingle() {
+    return selection.length === 1 ? selection[0] : null;
+}
+
 // Lock a rubber-band size to a width:height ratio, keeping each dimension
 // on the grid. The dominant axis drives the shape.
 function ratioRect(w, h, ratio) {
@@ -146,12 +154,13 @@ function nearRotateHandle(obj, px, py) {
 // Set the selected furniture's angle to the nearest 90° step facing the
 // pointer, measured from the furniture's center.
 function rotateSelectedToPointer(mx, my) {
-    if (!selected || selected.type !== 'furniture') return;
-    const box = getRectFor(selected);
+    const solo = selSingle();
+    if (!solo || solo.type !== 'furniture') return;
+    const box = getRectFor(solo);
     const cx = box.x + box.w / 2;
     const cy = box.y + box.h / 2;
     let deg = Math.round(Math.atan2(my - cy, mx - cx) * 180 / Math.PI / 90) * 90;
-    selected.angle = ((deg % 360) + 360) % 360;
+    solo.angle = ((deg % 360) + 360) % 360;
 }
 
 // Magnetic wall snapping: if an edge of the furniture's effective box is
@@ -307,7 +316,7 @@ function undo() {
     if (undoStack.length === 0) return;
     redoStack.push(JSON.stringify(objects));
     objects  = JSON.parse(undoStack.pop());
-    selected = null;
+    selection = [];
     updateDeleteButton();
     render();
     updateUndoRedoButtons();
@@ -319,7 +328,7 @@ function redo() {
     if (redoStack.length === 0) return;
     undoStack.push(JSON.stringify(objects));
     objects  = JSON.parse(redoStack.pop());
-    selected = null;
+    selection = [];
     updateDeleteButton();
     render();
     updateUndoRedoButtons();
@@ -333,7 +342,7 @@ function updateUndoRedoButtons() {
 
 // Grey out Delete button when nothing is selected
 function updateDeleteButton() {
-    document.getElementById('deleteBtn').disabled = !selected;
+    document.getElementById('deleteBtn').disabled = selection.length === 0;
 }
 
 
@@ -558,9 +567,39 @@ function drawPreview() {
     ctx.restore();
 }
 
+// -- Selection glow (offset outline under the handles) ---------
+
+function drawSelectionGlow(obj) {
+    if (obj.type === 'wall') {
+        ctx.beginPath();
+        ctx.moveTo(obj.x, obj.y);
+        ctx.lineTo(obj.x2, obj.y2);
+        ctx.strokeStyle = 'rgba(0,212,170,0.25)';
+        ctx.lineWidth   = WALL_THICK + 6;
+        ctx.lineCap     = 'round';
+        ctx.stroke();
+        return;
+    }
+    if (obj.type === 'door') {
+        ctx.beginPath();
+        ctx.arc(obj.x, obj.y, DOOR_SIZE + 5, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(0,212,170,0.25)';
+        ctx.lineWidth   = 2;
+        ctx.stroke();
+        return;
+    }
+    const box = getRectFor(obj);
+    ctx.strokeStyle = 'rgba(0,212,170,0.30)';
+    ctx.lineWidth   = 2;
+    ctx.strokeRect(box.x - 3, box.y - 3, box.w + 6, box.h + 6);
+}
+
 // -- Selection handles (small squares at corners) ---------------
 
 function drawSelectionHandles(obj) {
+    // Glow first so it sits beneath the corner handles
+    drawSelectionGlow(obj);
+
     const corners = getCorners(obj);
     ctx.fillStyle = COL.selected;
     for (const c of corners) {
@@ -568,7 +607,8 @@ function drawSelectionHandles(obj) {
     }
 
     // Furniture gets a circular rotation handle above its top edge
-    if (obj.type === 'furniture') {
+    // (only when this is the single selected piece)
+    if (obj.type === 'furniture' && selSingle() === obj) {
         const h = rotateHandlePos(obj);
         ctx.beginPath();
         ctx.arc(h.x, h.y, 7, 0, Math.PI * 2);
@@ -582,6 +622,24 @@ function drawSelectionHandles(obj) {
         ctx.textAlign   = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText('\u27F3', h.x, h.y + 0.5);
+
+        // Live angle readout while rotating the handle
+        if (rotating && selSingle() === obj) {
+            const label = ((obj.angle || 0) % 360) + '\u00B0';
+            ctx.font     = 'bold 10px sans-serif';
+            const tw     = ctx.measureText(label).width;
+            const px     = h.x - tw / 2 - 5;
+            const py     = h.y - 26;
+            ctx.fillStyle   = 'rgba(15,15,19,0.85)';
+            ctx.strokeStyle = COL.selected;
+            ctx.lineWidth   = 1;
+            ctx.fillRect(px, py, tw + 10, 15);
+            ctx.strokeRect(px, py, tw + 10, 15);
+            ctx.fillStyle    = COL.selected;
+            ctx.textAlign    = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(label, h.x, py + 7.5);
+        }
     }
 }
 
@@ -616,7 +674,7 @@ function render() {
 
     // Draw every object in order
     for (const obj of objects) {
-        const s = (obj === selected);
+        const s = selection.includes(obj);
         switch (obj.type) {
             case 'room':      drawRoom(obj, s);      break;
             case 'wall':      drawWall(obj, s);      break;
@@ -628,7 +686,21 @@ function render() {
 
     drawPreview();
 
-    if (selected) drawSelectionHandles(selected);
+    // Selection handles for every selected object
+    for (const obj of selection) drawSelectionHandles(obj);
+
+    // Marquee selection box (drawn last so it overlays everything)
+    if (marqueeRect) {
+        ctx.save();
+        ctx.fillStyle   = 'rgba(0,212,170,0.08)';
+        ctx.fillRect(marqueeRect.x, marqueeRect.y, marqueeRect.w, marqueeRect.h);
+        ctx.strokeStyle = COL.previewLine;
+        ctx.lineWidth   = 1.5;
+        ctx.setLineDash([4, 4]);
+        ctx.strokeRect(marqueeRect.x, marqueeRect.y, marqueeRect.w, marqueeRect.h);
+        ctx.setLineDash([]);
+        ctx.restore();
+    }
 }
 
 
@@ -686,6 +758,37 @@ function hitTest(mx, my) {
     return null;
 }
 
+// Return every object intersecting the marquee box (for multi-select).
+function hitTestMarquee(r) {
+    const hits = [];
+    const inRect = function (px, py) {
+        return px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h;
+    };
+
+    for (const obj of objects) {
+        if (obj.type === 'room' || obj.type === 'furniture' || obj.type === 'window') {
+            if (boxesOverlap(getRectFor(obj), r)) hits.push(obj);
+        } else if (obj.type === 'wall') {
+            // Selected when an endpoint is inside the box or the segment
+            // crosses any of the box's four edges (intersection, not
+            // containment — partial walls get caught).
+            if (inRect(obj.x, obj.y) || inRect(obj.x2, obj.y2)) {
+                hits.push(obj);
+            } else if (
+                segmentCrosses(obj.x, obj.y, obj.x2, obj.y2, r.x, r.y, r.x + r.w, r.y) ||
+                segmentCrosses(obj.x, obj.y, obj.x2, obj.y2, r.x + r.w, r.y, r.x + r.w, r.y + r.h) ||
+                segmentCrosses(obj.x, obj.y, obj.x2, obj.y2, r.x + r.w, r.y + r.h, r.x, r.y + r.h) ||
+                segmentCrosses(obj.x, obj.y, obj.x2, obj.y2, r.x, r.y + r.h, r.x, r.y)
+            ) {
+                hits.push(obj);
+            }
+        } else if (obj.type === 'door') {
+            if (inRect(obj.x, obj.y)) hits.push(obj);
+        }
+    }
+    return hits;
+}
+
 
 // ============================================================
 // EVENT HANDLERS
@@ -698,8 +801,9 @@ function handleMouseDown(e) {
 
         // ---- SELECT / MOVE ------------------------------------
         case 'select': {
-            // Rotation handle takes priority when a furniture piece is selected
-            if (selected && selected.type === 'furniture' && nearRotateHandle(selected, mx, my)) {
+            // Rotation handle takes priority when a single furniture is selected
+            const solo = selSingle();
+            if (solo && solo.type === 'furniture' && nearRotateHandle(solo, mx, my)) {
                 pushUndo();           // snapshot before the rotation
                 rotating = true;
                 rotateSelectedToPointer(mx, my);
@@ -708,22 +812,31 @@ function handleMouseDown(e) {
             }
 
             const hit = hitTest(mx, my);
-            selected = hit;
-            updateDeleteButton();
             if (hit) {
+                if (selection.length > 1 && selection.includes(hit)) {
+                    // Clicking a member of a multi-selection drags the whole group
+                    wallGrip = null;
+                } else {
+                    // Fresh selection — walls grab an endpoint for stretching
+                    selection = [hit];
+                    if (hit.type === 'wall') {
+                        // Stretch: the endpoint closer to the click becomes the grip
+                        const dStart = Math.hypot(mx - hit.x, my - hit.y);
+                        const dEnd   = Math.hypot(mx - hit.x2, my - hit.y2);
+                        wallGrip = dStart <= dEnd ? 'start' : 'end';
+                    }
+                }
+                updateDeleteButton();
                 pushUndo(); // snapshot before potential move / stretch
                 dragging = true;
-                if (hit.type === 'wall') {
-                    // Stretch: the endpoint closer to the click becomes the grip
-                    const dStart = Math.hypot(mx - hit.x, my - hit.y);
-                    const dEnd   = Math.hypot(mx - hit.x2, my - hit.y2);
-                    wallGrip  = dStart <= dEnd ? 'start' : 'end';
-                } else if (hit.type === 'room' || hit.type === 'furniture' || hit.type === 'window') {
-                    const r = getRectFor(hit);
-                    dragOffset = { x: mx - r.x, y: my - r.y };
-                } else {
-                    dragOffset = { x: mx - hit.x, y: my - hit.y };
-                }
+                dragBase = selection.map(function (o) {
+                    return { obj: o, x: o.x, y: o.y, x2: o.x2, y2: o.y2 };
+                });
+                dragStartMouse = { x: snap(mx), y: snap(my) };
+            } else {
+                // Empty space: begin (or restart) a marquee selection
+                marqueeStart = { x: mx, y: my };
+                marqueeRect  = null;
             }
             render();
             break;
@@ -762,7 +875,19 @@ function handleMouseMove(e) {
 
         // ---- SELECT / MOVE (drag selected object) ------------
         case 'select': {
-            if (!dragging || !selected) break;
+            // Expanding a marquee: track the live selection box
+            if (marqueeStart) {
+                marqueeRect = {
+                    x: Math.min(marqueeStart.x, mx),
+                    y: Math.min(marqueeStart.y, my),
+                    w: Math.abs(mx - marqueeStart.x),
+                    h: Math.abs(my - marqueeStart.y),
+                };
+                requestRender();
+                break;
+            }
+
+            if (!dragging || !dragBase) break;
 
             // Furniture rotation: drag the handle around the center
             if (rotating) {
@@ -773,44 +898,42 @@ function handleMouseMove(e) {
 
             // Wall stretching: slide the grip endpoint, keep the anchor fixed.
             // If the moving endpoint is near another wall's endpoint, snap to it.
-            if (selected.type === 'wall' && wallGrip) {
+            if (wallGrip && dragBase.length === 1 && dragBase[0].obj.type === 'wall') {
+                const wall = dragBase[0].obj;
                 var tx = snap(mx);
                 var ty = snap(my);
-                var ep = wallEndpointSnap(tx, ty, selected);
+                var ep = wallEndpointSnap(tx, ty, wall);
                 var gx = ep ? ep.x : tx;
                 var gy = ep ? ep.y : ty;
                 if (wallGrip === 'start') {
-                    selected.x = gx;
-                    selected.y = gy;
+                    wall.x = gx;
+                    wall.y = gy;
                 } else {
-                    selected.x2 = gx;
-                    selected.y2 = gy;
+                    wall.x2 = gx;
+                    wall.y2 = gy;
                 }
                 requestRender();
                 break;
             }
 
-            const nx = snap(mx - dragOffset.x);
-            const ny = snap(my - dragOffset.y);
-
-            if (selected.type === 'furniture') {
-                // Move via the effective box so rotated pieces track the pointer
-                const cur = getRectFor(selected);
-                selected.x += nx - cur.x;
-                selected.y += ny - cur.y;
-                // Magnetic wall snap wins over plain grid snapping when close
-                const mag = magnetSnap(selected);
-                if (mag) {
-                    selected.x += mag.dx;
-                    selected.y += mag.dy;
+            // Translate every selected object by the same grid delta
+            const dx = snap(mx) - dragStartMouse.x;
+            const dy = snap(my) - dragStartMouse.y;
+            for (const b of dragBase) {
+                b.obj.x = b.x + dx;
+                b.obj.y = b.y + dy;
+                if (b.obj.type === 'wall') {
+                    b.obj.x2 = b.x2 + dx;
+                    b.obj.y2 = b.y2 + dy;
                 }
-            } else if (selected.type === 'room' || selected.type === 'window') {
-                selected.x = nx;
-                selected.y = ny;
-            } else {
-                // Door — just move the point
-                selected.x = nx;
-                selected.y = ny;
+                // Magnetic wall snap wins over plain grid snapping when close
+                if (b.obj.type === 'furniture') {
+                    const mag = magnetSnap(b.obj);
+                    if (mag) {
+                        b.obj.x += mag.dx;
+                        b.obj.y += mag.dy;
+                    }
+                }
             }
             requestRender();
             break;
@@ -854,12 +977,26 @@ function handleMouseUp(e) {
 
     switch (tool) {
 
-        // ---- SELECT (finish drag) ----------------------------
+        // ---- SELECT (finish drag / marquee) -----------------
         case 'select': {
+            // Finish a marquee: select everything the box touches
+            if (marqueeStart) {
+                if (marqueeRect && (marqueeRect.w > 2 || marqueeRect.h > 2)) {
+                    selection = hitTestMarquee(marqueeRect);
+                    updateDeleteButton();
+                } else {
+                    // Plain click on empty space — deselect everything
+                    selection = [];
+                    updateDeleteButton();
+                }
+                marqueeStart = null;
+                marqueeRect  = null;
+            }
             dragging = false;
             rotating = false;
             wallGrip = null;
-            dragOffset = { x: 0, y: 0 };
+            dragBase = null;
+            render();
             break;
         }
 
@@ -982,7 +1119,7 @@ function load() {
     const raw = localStorage.getItem('flort-objects');
     if (raw) {
         objects   = JSON.parse(raw);
-        selected  = null;
+        selection = [];
         undoStack = [];
         redoStack = [];
         updateUndoRedoButtons();
@@ -996,18 +1133,19 @@ function clearAll() {
         cancelRoomEdit(); // wiped objects, so the editor reference is stale
         pushUndo();
         objects  = [];
-        selected = null;
+        selection = [];
         updateDeleteButton();
         render();
     }
 }
 
 function deleteSelected() {
-    if (!selected) return;
+    if (selection.length === 0) return;
     cancelRoomEdit(); // deleting the room being edited
     pushUndo();
-    objects = objects.filter(function (o) { return o !== selected; });
-    selected = null;
+    const doomed = new Set(selection);
+    objects = objects.filter(function (o) { return !doomed.has(o); });
+    selection = [];
     updateDeleteButton();
     render();
 }
@@ -1028,7 +1166,7 @@ function exportPNG() {
 document.querySelectorAll('.tool-btn').forEach(function (btn) {
     btn.addEventListener('click', function () {
         tool     = btn.dataset.tool;
-        selected = null;
+        selection = [];
         updateDeleteButton();
         dragging = false;
         preview    = null;
