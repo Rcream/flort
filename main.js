@@ -61,12 +61,16 @@ let wallGrip      = null;       // 'start' | 'end' — which wall endpoint follo
 let rotating      = false;      // True while dragging a furniture rotation handle
 let furnitureKind = 'bed';      // Currently selected furniture preset
 let rafPending    = false;      // Dirty flag for requestAnimationFrame render coalescing
+let editingRoom   = null;      // Room whose name is being edited (or null)
 
 
 // ----- Canvas setup ------------------------------------------------
 
 const canvas = document.getElementById('canvas');
 const ctx    = canvas.getContext('2d');
+
+// Overlay input used to rename rooms (hidden until a room is edited)
+const roomLabelInput = document.getElementById('roomLabelInput');
 
 // Resize the canvas to fill the space below the toolbar
 function resizeCanvas() {
@@ -299,6 +303,7 @@ function pushUndo() {
 
 // Restore the state before the last mutation
 function undo() {
+    commitRoomEdit(); // finish any label edit first so it becomes undoable
     if (undoStack.length === 0) return;
     redoStack.push(JSON.stringify(objects));
     objects  = JSON.parse(undoStack.pop());
@@ -310,6 +315,7 @@ function undo() {
 
 // Re-apply the last undone mutation
 function redo() {
+    commitRoomEdit();
     if (redoStack.length === 0) return;
     undoStack.push(JSON.stringify(objects));
     objects  = JSON.parse(redoStack.pop());
@@ -378,14 +384,28 @@ function drawRoom(obj, isSel) {
     ctx.lineWidth   = isSel ? 2 : 1.5;
     ctx.strokeRect(obj.x, obj.y, obj.w, obj.h);
 
-    // Dimension label  (only if the room is big enough to read)
+    // Labels — dimensions, plus the room name above them if one is set
     if (obj.w > 40 && obj.h > 30) {
-        const label = pxToM(obj.w) + 'm \u00d7 ' + pxToM(obj.h) + 'm';
-        ctx.fillStyle    = isSel ? COL.selected : COL.roomLabel;
-        ctx.font         = '12px sans-serif';
-        ctx.textAlign    = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(label, obj.x + obj.w / 2, obj.y + obj.h / 2);
+        const cx      = obj.x + obj.w / 2;
+        const cy      = obj.y + obj.h / 2;
+        const hasName = obj.name && obj.name.length > 0;
+        const dims    = pxToM(obj.w) + 'm \u00d7 ' + pxToM(obj.h) + 'm';
+
+        ctx.textAlign = 'center';
+        if (hasName) {
+            ctx.fillStyle    = isSel ? COL.selected : COL.roomLabel;
+            ctx.font         = 'bold 12px sans-serif';
+            ctx.textBaseline = 'bottom';
+            ctx.fillText(obj.name, cx, cy - 2);
+            ctx.font         = '10px sans-serif';
+            ctx.textBaseline = 'top';
+            ctx.fillText(dims, cx, cy + 2);
+        } else {
+            ctx.fillStyle    = isSel ? COL.selected : COL.roomLabel;
+            ctx.font         = '12px sans-serif';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(dims, cx, cy);
+        }
     }
 }
 
@@ -903,6 +923,53 @@ function handleMouseUp(e) {
 
 
 // ============================================================
+// ROOM LABEL EDITING
+// ============================================================
+
+// Position the overlay input over the middle of the room
+function centerRoomEditor(room) {
+    const cr = canvas.getBoundingClientRect();
+    const cx = cr.left + room.x + room.w / 2;
+    const cy = cr.top  + room.y + room.h / 2;
+    roomLabelInput.style.left  = cx + 'px';
+    roomLabelInput.style.top   = cy + 'px';
+    roomLabelInput.style.width = Math.min(Math.max(room.w - 8, 60), 240) + 'px';
+}
+
+// Open the name editor for a room (committing any other open edit first)
+function openRoomEditor(room) {
+    commitRoomEdit();
+    editingRoom = room;
+    roomLabelInput.value = room.name || '';
+    centerRoomEditor(room);
+    roomLabelInput.classList.add('visible');
+    roomLabelInput.focus();
+    roomLabelInput.select();
+}
+
+// Save the typed name (snapshot first so Undo restores the old name)
+function commitRoomEdit() {
+    if (!editingRoom) return;
+    const text = roomLabelInput.value.trim();
+    const prev = editingRoom.name || '';
+    roomLabelInput.classList.remove('visible');
+    if (text !== prev) {
+        pushUndo();
+        editingRoom.name = text;
+    }
+    editingRoom = null;
+    render();
+}
+
+// Dismiss the editor without saving
+function cancelRoomEdit() {
+    roomLabelInput.classList.remove('visible');
+    editingRoom = null;
+    render();
+}
+
+
+// ============================================================
 // SAVE / LOAD / CLEAR / EXPORT
 // ============================================================
 
@@ -911,6 +978,7 @@ function save() {
 }
 
 function load() {
+    cancelRoomEdit(); // editor holds a reference to an object being replaced
     const raw = localStorage.getItem('flort-objects');
     if (raw) {
         objects   = JSON.parse(raw);
@@ -925,6 +993,7 @@ function load() {
 
 function clearAll() {
     if (objects.length === 0 || confirm('Clear all objects?')) {
+        cancelRoomEdit(); // wiped objects, so the editor reference is stale
         pushUndo();
         objects  = [];
         selected = null;
@@ -935,6 +1004,7 @@ function clearAll() {
 
 function deleteSelected() {
     if (!selected) return;
+    cancelRoomEdit(); // deleting the room being edited
     pushUndo();
     objects = objects.filter(function (o) { return o !== selected; });
     selected = null;
@@ -987,8 +1057,9 @@ document.getElementById('furnitureMenu').addEventListener('change', function (e)
     furnitureKind = e.target.value;
 });
 
-// Keyboard shortcuts
+// Keyboard shortcuts (ignored while typing in the label editor)
 document.addEventListener('keydown', function (e) {
+    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
     // Ctrl+Z / Cmd+Z = Undo
     if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
         e.preventDefault();
@@ -1016,6 +1087,28 @@ canvas.addEventListener('mousedown', handleMouseDown);
 canvas.addEventListener('mousemove', handleMouseMove);
 // mouseup on window so dragging ends even if the cursor leaves the canvas
 window.addEventListener('mouseup', handleMouseUp);
+
+// Double-click a room (in Select mode) to rename it
+canvas.addEventListener('dblclick', function (e) {
+    if (tool !== 'select') return;
+    const { x, y } = getMousePos(e);
+    const hit = hitTest(x, y);
+    if (hit && hit.type === 'room') openRoomEditor(hit);
+});
+
+// Commit the label on Enter, cancel on Escape
+roomLabelInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') {
+        e.preventDefault();
+        commitRoomEdit();
+    } else if (e.key === 'Escape') {
+        e.preventDefault();
+        cancelRoomEdit();
+    }
+});
+
+// Clicking anywhere else commits the current edit
+roomLabelInput.addEventListener('blur', commitRoomEdit);
 
 canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
 window.addEventListener('resize', resizeCanvas);
